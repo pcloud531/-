@@ -1,0 +1,481 @@
+
+---
+
+## 文件二：OpenAPI 规范 – Borrow Service
+
+```yaml
+openapi: 3.0.3
+
+info:
+  title: 借阅与预约服务 API
+  version: 1.0.0
+  description: |
+    提供图书借阅、续借、归还、预约、取消预约及借阅列表查询功能。
+    
+    ## 功能列表
+    - 借阅图书
+    - 续借图书
+    - 归还图书
+    - 查询当前读者借阅列表
+    - 预约图书
+    - 取消预约
+    - 服务健康状态检查
+  contact:
+    name: 开发团队
+    email: dev@library.com
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: 本地开发环境
+  - url: https://dev-api.library.com/api/v1
+    description: 开发测试环境
+  - url: https://api.library.com/api/v1
+    description: 生产环境
+
+tags:
+  - name: Loan
+    description: 借阅相关操作
+  - name: Reservation
+    description: 预约相关操作
+  - name: Infrastructure
+    description: 基础设施与运维接口
+
+paths:
+  /healthz:
+    get:
+      tags:
+        - Infrastructure
+      summary: Liveness/Readiness 探针
+      description: 检查服务是否存活且运行正常。
+      security: []
+      responses:
+        "200":
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: "ok"
+                service: "borrow-service-7b8f9d6c5-x4k2p"
+                timestamp: "2026-04-10T08:30:00Z"
+        "503":
+          description: 服务异常（依赖不可用）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /loans:
+    post:
+      security:
+        - BearerAuth: []
+      tags:
+        - Loan
+      summary: 借阅图书
+      description: |
+        读者借阅一本图书。需要提供副本ID（copyId）。
+        系统会校验读者状态（Active）、借阅数量（未达上限）及副本状态（Available）。
+      operationId: borrowBook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - copyId
+              properties:
+                copyId:
+                  type: string
+                  description: 图书副本ID
+                  example: "copy-123"
+      responses:
+        "201":
+          description: 借阅成功，返回借阅单信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoanResponse"
+        "400":
+          description: 请求参数错误（如 copyId 格式无效）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: 未认证
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: 权限不足或业务规则拒绝（如停借、数量超限）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: 资源冲突（如副本已被借走、并发借阅）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: 依赖服务不可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      security:
+        - BearerAuth: []
+      tags:
+        - Loan
+      summary: 查询当前读者借阅列表
+      description: 获取当前登录读者的所有借阅单（包含 Active 和 Overdue 状态）。
+      operationId: getCurrentLoans
+      responses:
+        "200":
+          description: 成功返回借阅列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loans:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LoanResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /loans/{loanId}/renew:
+    post:
+      security:
+        - BearerAuth: []
+      tags:
+        - Loan
+      summary: 续借图书
+      description: |
+        对未逾期、未超过续借次数的借阅单进行续借，延长应还日期。
+      operationId: renewLoan
+      parameters:
+        - name: loanId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 借阅单ID
+          example: "loan-456"
+      responses:
+        "200":
+          description: 续借成功，返回更新后的借阅单
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoanResponse"
+        "400":
+          description: 业务规则拒绝（已逾期、已达续借上限等）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: 借阅单不存在或不属于当前读者
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /loans/{loanId}/return:
+    post:
+      security:
+        - BearerAuth: []
+      tags:
+        - Loan
+      summary: 归还图书
+      description: |
+        读者或管理员归还图书。若逾期，将异步触发罚款单生成。
+      operationId: returnLoan
+      parameters:
+        - name: loanId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 借阅单ID
+          example: "loan-456"
+      responses:
+        "200":
+          description: 归还成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Book returned successfully"
+                  overdueDays:
+                    type: integer
+                    description: 逾期天数（0 表示未逾期）
+                    example: 0
+        "400":
+          description: 业务规则拒绝（如已归还过）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: 借阅单不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /reservations:
+    post:
+      security:
+        - BearerAuth: []
+      tags:
+        - Reservation
+      summary: 预约图书
+      description: |
+        当某书目下所有副本均为 Loaned 状态时，读者可以预约。
+        系统会按时间顺序排队。
+      operationId: reserveBook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bookId
+              properties:
+                bookId:
+                  type: string
+                  description: 书目ID（而非副本ID）
+                  example: "book-789"
+      responses:
+        "201":
+          description: 预约成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationResponse"
+        "400":
+          description: 规则拒绝（如尚有可借副本、已有预约等）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: 冲突（如已有有效预约）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /reservations/{reservationId}:
+    delete:
+      security:
+        - BearerAuth: []
+      tags:
+        - Reservation
+      summary: 取消预约
+      description: 读者主动取消尚未到书的预约。
+      operationId: cancelReservation
+      parameters:
+        - name: reservationId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 预约单ID
+          example: "res-101"
+      responses:
+        "204":
+          description: 取消成功（无响应体）
+        "400":
+          description: 预约已满足或已过期，无法取消
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: 预约单不存在或不属于当前读者
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+        - timestamp
+      properties:
+        status:
+          type: string
+          description: 状态（ok / degraded / down）
+          example: "ok"
+        service:
+          type: string
+          description: 服务实例标识
+          example: "borrow-service-7b8f9d6c5-x4k2p"
+        timestamp:
+          type: string
+          format: date-time
+          description: UTC 时间
+          example: "2026-04-10T08:30:00Z"
+
+    ErrorResponse:
+      type: object
+      required:
+        - traceId
+        - code
+        - message
+      properties:
+        traceId:
+          type: string
+          format: uuid
+          description: 链路追踪ID
+        code:
+          type: string
+          description: 业务错误码
+        message:
+          type: string
+          description: 错误描述
+        details:
+          type: object
+          description: 附加信息
+          additionalProperties: true
+
+    LoanResponse:
+      type: object
+      required:
+        - loanId
+        - copyId
+        - bookTitle
+        - loanDate
+        - dueDate
+        - status
+      properties:
+        loanId:
+          type: string
+          description: 借阅单ID
+          example: "loan-456"
+        copyId:
+          type: string
+          description: 副本ID
+          example: "copy-123"
+        bookTitle:
+          type: string
+          description: 书名
+          example: "Java编程思想"
+        loanDate:
+          type: string
+          format: date
+          description: 借出日期
+          example: "2026-04-10"
+        dueDate:
+          type: string
+          format: date
+          description: 应还日期
+          example: "2026-05-10"
+        returnDate:
+          type: string
+          format: date
+          description: 实际归还日期（仅当已归还时存在）
+          nullable: true
+        status:
+          type: string
+          enum: [Active, Overdue, Returned, Closed]
+          description: 借阅单状态
+        renewalCount:
+          type: integer
+          description: 已续借次数
+          example: 0
+
+    ReservationResponse:
+      type: object
+      required:
+        - reservationId
+        - bookId
+        - bookTitle
+        - createdAt
+        - status
+      properties:
+        reservationId:
+          type: string
+          description: 预约单ID
+          example: "res-101"
+        bookId:
+          type: string
+          description: 书目ID
+          example: "book-789"
+        bookTitle:
+          type: string
+          description: 书名
+          example: "Java编程思想"
+        createdAt:
+          type: string
+          format: date-time
+          description: 预约创建时间
+        status:
+          type: string
+          enum: [Pending, Fulfilled, Cancelled, Expired]
+          description: 预约状态
+        queuePosition:
+          type: integer
+          description: 排队位置（1-based），仅当 Pending 时有效
+          example: 2
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT Bearer Token，通过登录接口获取。Token 中包含读者 ID（sub）和角色（ROLE_READER）。
+
+  responses:
+    Unauthorized:
+      description: 未认证或 Token 无效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: 服务或依赖不可用
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+security:
+  - BearerAuth: []
